@@ -73,6 +73,16 @@ contract YieldDistributor is OwnableUpgradeable {
     address[] public queuedProjectsForRemoval;
     // @notice The voting power allocated to projects by voters in the current cycle
     uint256[] public projectDistributions;
+    /* IIUC, `projectDistributions` and `projects` are intended to be kept in sync.
+    - This is a somewhat fragile pattern. At the very least, it should be commented and made explicit.
+    - It would be better to have a single array with a struct holding the address and uint256. That is
+      not gas-optimal, but given that this contract lives on Gnosis I think the balance between code
+      quality and gas optimization should tilt heavily towards the former.
+    - Even better IMO would be a `mapping(address => uint256)` to track distributions per project.
+      That would allow a voting interface that passes votes by address rather than array index, which
+      is pretty hard to debug after the fact (e.g. through a chain explorer). The current setup is more
+      vulnerable to either of an evil frontend or MEV. Neither of those is a proximate issue, but still.
+    */
     // @notice The last block number in which a specified account cast a vote
     mapping(address => uint256) public accountLastVoted;
 
@@ -121,6 +131,14 @@ contract YieldDistributor is OwnableUpgradeable {
      * @return uint256 The voting power of the user
      */
     function getCurrentVotingPower(address _account) public view returns (uint256) {
+        /*
+        - This returns the voting power based on the last period, which is intended but may be
+          surprising. It would be good to comment this behavior.
+        - It also uses `cycleLength` (the minimum time between cycles) for this calculation rather
+          than the actual time for the block before the last claimed block. If this is an intentional
+          choice it should be explicitly called out, but I think it might make more sense to track the
+          last two distribution blocks, rather than just `lastClaimedBlockNumber` here.
+        */
         return this.getVotingPowerForPeriod(lastClaimedBlockNumber - cycleLength, lastClaimedBlockNumber, _account);
     }
 
@@ -170,6 +188,9 @@ contract YieldDistributor is OwnableUpgradeable {
 
             _latestKey = _currentCheckpoint._key;
         }
+        /* It really feels like L170-190 could be unified into a single loop rather than a separate
+        step for calculating just the first chunk of voting power.
+        */
 
         return _totalVotingPower;
     }
@@ -202,7 +223,9 @@ contract YieldDistributor is OwnableUpgradeable {
 
         BREAD.claimYield(BREAD.yieldAccrued(), address(this));
         lastClaimedBlockNumber = block.number;
-
+        /* This is presumably leaving some dust in this contract, which is probably fine but may
+        deserve a callout comment.
+        */
         uint256 _halfYield = BREAD.balanceOf(address(this)) / 2;
         uint256 _baseSplit = _halfYield / projects.length;
 
@@ -236,6 +259,8 @@ contract YieldDistributor is OwnableUpgradeable {
     /**
      * @notice Internal function for casting votes for a specified user
      * @param _account Address of user to cast votes for
+     *  /* Unless I'm missing something, calling these basis points is pretty confusing, since that term
+     *  usually refers to 1/100th of a percent, which these are not.
      * @param _points Basis points for calculating the amount of votes cast
      * @param _votingPower Amount of voting power being cast
      */
@@ -279,6 +304,8 @@ contract YieldDistributor is OwnableUpgradeable {
         for (uint256 i; i < _oldProjects.length; ++i) {
             address _project = _oldProjects[i];
             bool _remove;
+            /* Using a mapping would eliminate the need for this inner loop.
+            */
 
             for (uint256 j; j < queuedProjectsForRemoval.length; ++j) {
                 if (_project == queuedProjectsForRemoval[j]) {
@@ -307,7 +334,11 @@ contract YieldDistributor is OwnableUpgradeable {
                 revert AlreadyMemberProject();
             }
         }
-
+        /* Arguably this method should check if the project is in the removal queue and remove it from
+        there if so. As is, if someone fat-fingers their way into removing a project, there's no way to
+        undo that, since a project that is in both the addition and removal queues will end up removed
+        no matter what.
+        */
         for (uint256 i; i < queuedProjectsForAddition.length; ++i) {
             if (queuedProjectsForAddition[i] == _project) {
                 revert ProjectAlreadyQueued();
@@ -329,6 +360,9 @@ contract YieldDistributor is OwnableUpgradeable {
             }
         }
 
+        /* Just a callout that if this method is altered to check the addition queue, it'll have to
+        change this check as well.
+        */
         if (!_found) revert ProjectNotFound();
 
         for (uint256 i; i < queuedProjectsForRemoval.length; ++i) {
